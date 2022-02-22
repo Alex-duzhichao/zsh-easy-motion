@@ -171,64 +171,19 @@ def find_latest_line_start(cursor_position, text):
     return latest_line_start.start(1)
 
 
-def adjust_text(cursor_position, text, is_forward_motion, motion):
-    # type: (int, str, bool, str) -> Tuple[str, int]
-    indices_offset = 0
-    if is_forward_motion:
-        if motion in LINEWISE_MOTIONS:
-            first_line_end_index = find_first_line_end(cursor_position, text)
-            text = text[cursor_position + first_line_end_index :]
-            indices_offset = cursor_position + first_line_end_index
-        else:
-            # Take one character more at the start to exclude wrong positives for word beginnings
-            # Pad one character at the end to be compatible with the handling of word endings (see below)
-            text = text[cursor_position:] + " "
-            indices_offset = cursor_position
-    else:
-        if motion in LINEWISE_MOTIONS:
-            latest_line_start_index = find_latest_line_start(cursor_position, text)
-            text = text[:latest_line_start_index]
-        else:
-            # Take one character more at the end to exclude wrong positives for word endings
-            # Pad one character at the start to be compatible with the handling of word beginnings (see above)
-            text = " " + text[: cursor_position + 1]
-            indices_offset = -1
-    return text, indices_offset
-
-
-def motion_to_indices(cursor_position, text, motion, motion_argument):
+def motion_to_indices(cursor_position, text):
     # type: (int, str, str, Optional[str]) -> Iterable[int]
     indices_offset = 0
-    if motion in FORWARD_MOTIONS and motion in BACKWARD_MOTIONS:
-        # Split the motion into the forward and backward motion and handle these recursively
-        forward_motion_indices = motion_to_indices(cursor_position, text, motion + ">", motion_argument)
-        backward_motion_indices = motion_to_indices(cursor_position, text, motion + "<", motion_argument)
-        # Create a generator which yields the indices round-robin
-        indices = (
-            index
-            for index_pair in zip_longest(forward_motion_indices, backward_motion_indices)
-            for index in index_pair
-            if index is not None
-        )
-    else:
-        is_forward_motion = motion in FORWARD_MOTIONS or motion.endswith(">")
-        if motion.endswith(">") or motion.endswith("<"):
-            motion = motion[:-1]
-        text, indices_offset = adjust_text(cursor_position, text, is_forward_motion, motion)
-        if motion_argument is None:
-            regex = re.compile(MOTION_TO_REGEX[motion], flags=re.MULTILINE)
-        else:
-            regex = re.compile(MOTION_TO_REGEX[motion].format(re.escape(motion_argument)), flags=re.MULTILINE)
-        matches = regex.finditer(text)
-        if not is_forward_motion:
-            matches = reversed(list(matches))
-        is_linewise_motion = motion in LINEWISE_MOTIONS
-        indices = (
-            match_obj.start(i) + indices_offset
-            for match_obj in matches
-            for i in range(1, regex.groups + 1)
-            if match_obj.start(i) >= 0 and (is_linewise_motion or (0 < match_obj.start(i) < len(text) - 1))
-        )
+    text, indices_offset = " " + text, -1
+    regex = re.compile(r"\b(\w)", flags=re.MULTILINE)
+    matches = regex.finditer(text)
+    is_linewise_motion = False
+    indices = (
+        match_obj.start(i) + indices_offset
+        for match_obj in matches
+        for i in range(1, regex.groups + 1)
+        if match_obj.start(i) >= 0 and (is_linewise_motion or (0 < match_obj.start(i) < len(text) - 1))
+    )
     return indices
 
 
@@ -369,7 +324,7 @@ def handle_user_input(cursor_position, is_in_viopp, target_keys, text):
 
     old_term_settings = setup_terminal()
 
-    read_state = ReadState.MOTION
+    read_state = ReadState.HIGHLIGHT
     motion = None
     motion_argument = None
     target = None
@@ -378,30 +333,14 @@ def handle_user_input(cursor_position, is_in_viopp, target_keys, text):
         while True:
             if read_state != ReadState.HIGHLIGHT:
                 next_key = os.read(fd, 80)[:1].decode("ascii")  # blocks until any amount of bytes is available
-            if read_state == ReadState.MOTION:
-                if motion is None:
-                    motion = next_key
-                else:
-                    motion += next_key
-                if motion != "g":  # `g` always needs a second key press
-                    if motion not in VALID_MOTIONS:
-                        raise InvalidMotionError('The key "{}" is no valid motion.'.format(motion))
-                    if motion in MOTIONS_WITH_ARGUMENT:
-                        read_state = ReadState.MOTION_ARGUMENT
-                    else:
-                        read_state = ReadState.HIGHLIGHT
-            elif read_state == ReadState.MOTION_ARGUMENT:
-                motion_argument = next_key
-                read_state = ReadState.HIGHLIGHT
-            elif read_state == ReadState.TARGET:
+            if read_state == ReadState.TARGET:
                 target = next_key
                 if target not in target_keys:
                     raise InvalidTargetError('The key "{}" is no valid target.'.format(target))
                 read_state = ReadState.HIGHLIGHT
             elif read_state == ReadState.HIGHLIGHT:
-                assert motion is not None
                 if grouped_indices is None:
-                    indices = motion_to_indices(cursor_position, text, motion, motion_argument)
+                    indices = motion_to_indices(cursor_position, text)
                     grouped_indices = group_indices(indices, len(target_keys))
                 else:
                     try:
